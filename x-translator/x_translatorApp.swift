@@ -6,27 +6,18 @@
 //
 
 import SwiftUI
-import SwiftData
 
 @main
 struct x_translatorApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
+    @StateObject private var appState = AppState.shared
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        MenuBarExtra {
+            MenuBarContentView(state: appState)
+        } label: {
+            Image("MenuBarIcon")
+                .renderingMode(.template)
         }
-        .modelContainer(sharedModelContainer)
     }
 }
