@@ -11,6 +11,23 @@ import Foundation
 import NaturalLanguage
 import Translation
 
+enum TranslationRequestOrigin {
+    case selection
+    case manualInput
+}
+
+enum OverlayMode: Equatable {
+    case hidden
+    case probingSelection
+    case selectionTranslating
+    case selectionResult
+    case selectionError
+    case manualInput
+    case manualTranslating
+    case manualResult
+    case manualError
+}
+
 @MainActor
 final class AppState: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     static let shared = AppState()
@@ -23,15 +40,23 @@ final class AppState: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published var detectedSourceLanguage: Locale.Language?
     @Published var errorMessage: String?
     @Published var isTranslating = false
+    @Published var manualInputText = ""
+    @Published var manualSourceLanguage: InputSourceLanguage = .autoDetect
+    @Published var manualTranslatedText = ""
+    @Published var manualTranslationError: String?
+    @Published var manualIsTranslating = false
     @Published var isSpeakingTranslation = false
     @Published var autoCopyTranslation = false
     @Published var lastUpdatedAt: Date?
     @Published var translationConfiguration: TranslationSession.Configuration?
     @Published var interfaceLanguage: InterfaceLanguage = InterfaceLanguage(rawValue: L10n.interfaceLanguageCode) ?? .system
     @Published var spokenRange: NSRange?
+    @Published var overlayMode: OverlayMode = .hidden
     @Published private(set) var shortcutDisplayText = "Command + Shift + T"
     @Published private(set) var translationRequestID = UUID()
     @Published private(set) var translationTaskID = UUID()
+    @Published private(set) var activeTranslationText = ""
+    @Published private(set) var activeTranslationOrigin: TranslationRequestOrigin = .selection
 
     static let translationWorkerRefreshNotification = Notification.Name("AppState.translationWorkerRefresh")
 
@@ -40,6 +65,7 @@ final class AppState: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     private let speechSynthesizer = AVSpeechSynthesizer()
     private let overlayController = OverlayPanelController()
     private var translationTimeoutTask: Task<Void, Never>?
+    private var manualTranslationDebounceTask: Task<Void, Never>?
 
     private override init() {
         super.init()
@@ -56,6 +82,7 @@ final class AppState: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     func hideOverlay() {
         stopSpeaking()
+        overlayMode = .hidden
         overlayController.hide()
     }
 
@@ -63,19 +90,25 @@ final class AppState: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         permissionGranted = selectionMonitor.refreshPermission(prompt: prompt)
     }
 
-    func copyTranslation() {
-        guard translatedText.isEmpty == false else { return }
-
+    func copyCurrentTranslation() {
+        let textToCopy: String
+        if isManualMode {
+            guard manualTranslatedText.isEmpty == false else { return }
+            textToCopy = manualTranslatedText
+        } else {
+            guard translatedText.isEmpty == false else { return }
+            textToCopy = translatedText
+        }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(translatedText, forType: .string)
+        NSPasteboard.general.setString(textToCopy, forType: .string)
     }
 
     func replaceClipboard() {
-        copyTranslation()
+        copyCurrentTranslation()
     }
 
     func speakTranslation() {
-        guard translatedText.isEmpty == false else { return }
+        guard translatedText.isEmpty == false, isManualMode == false else { return }
 
         if isSpeakingTranslation {
             stopSpeaking()
@@ -93,6 +126,7 @@ final class AppState: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     func triggerSelectedTextTranslation() {
+        let anchor = fallbackAnchorRect()
         permissionGranted = selectionMonitor.hasPermission
         if permissionGranted == false {
             permissionGranted = selectionMonitor.refreshPermission(prompt: true)
@@ -104,65 +138,198 @@ final class AppState: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
             spokenRange = nil
             translationConfiguration = nil
             lastUpdatedAt = Date()
-            (NSApp.delegate as? AppDelegate)?.showConsoleWindow()
+                (NSApp.delegate as? AppDelegate)?.showConsoleWindow()
             return
         }
+        startSelectionProbe()
+
+        do {
+            let snapshot = try selectionMonitor.captureSelectedText()
+            if shouldAutoTranslate(snapshot: snapshot) {
+                selectedText = snapshot.text
+                detectedSourceLanguage = detectLanguage(for: snapshot.text)
+                detectedSourceLanguageName = detectedSourceLanguage?.minimalIdentifier.localizedAppLanguageName ?? L10n.tr("language.auto_detect")
+                overlayController.show(state: self, anchorRect: anchor)
+                beginTranslation(
+                    text: snapshot.text,
+                    origin: .selection,
+                    detectedSourceLanguage: detectedSourceLanguage
+                )
+            } else {
+                overlayController.show(state: self, anchorRect: anchor)
+                showManualInputMode(prefill: "")
+            }
+        } catch let error as SelectedTextCaptureError {
+            switch error {
+            case .accessibilityPermissionRequired:
+                overlayMode = .hidden
+                overlayController.hide()
+                errorMessage = L10n.tr("error.accessibility_permission_required")
+                translatedText = ""
+                isTranslating = false
+                lastUpdatedAt = Date()
+                (NSApp.delegate as? AppDelegate)?.showConsoleWindow()
+            case .noFrontmostApplication, .cannotCaptureFromOwnApp, .copyShortcutDidNotProduceClipboardChange, .emptyClipboardText:
+                overlayController.show(state: self, anchorRect: anchor)
+                showManualInputMode(prefill: "")
+            }
+        } catch {
+            overlayController.show(state: self, anchorRect: anchor)
+            showManualInputMode(prefill: "")
+        }
+    }
+
+    func submitManualTranslation() {
+        let trimmedText = manualInputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        manualInputText = trimmedText
+
+        guard trimmedText.isEmpty == false else {
+            manualTranslatedText = ""
+            manualTranslationError = nil
+            manualIsTranslating = false
+            overlayMode = .manualInput
+            return
+        }
+
         cancelTranslationTimeout()
         translationConfiguration?.invalidate()
         translationConfiguration = nil
         translationRequestID = UUID()
         translationTaskID = UUID()
-        notifyTranslationWorkerRefresh()
-        spokenRange = nil
-        translatedText = ""
-        errorMessage = nil
-        isTranslating = true
+        activeTranslationOrigin = .manualInput
+        activeTranslationText = trimmedText
+        manualTranslatedText = ""
+        manualTranslationError = nil
+        manualIsTranslating = true
+        overlayMode = .manualTranslating
         lastUpdatedAt = Date()
-        overlayController.cancelAutoDismiss()
+        notifyTranslationWorkerRefresh()
 
-        do {
-            let snapshot = try selectionMonitor.captureSelectedText()
-            selectedText = snapshot.text
-            detectedSourceLanguage = detectLanguage(for: snapshot.text)
-            detectedSourceLanguageName = detectedSourceLanguage?.minimalIdentifier.localizedAppLanguageName ?? L10n.tr("language.auto_detect")
-            overlayController.show(
-                state: self,
-                anchorRect: fallbackAnchorRect()
-            )
-            refreshTranslationForCurrentSelection()
-        } catch {
-            overlayController.show(
-                state: self,
-                anchorRect: fallbackAnchorRect()
-            )
-            failTranslation(error.localizedDescription)
+        beginTranslation(
+            text: trimmedText,
+            origin: .manualInput,
+            detectedSourceLanguage: manualSourceLanguage.localeLanguage ?? detectLanguage(for: trimmedText)
+        )
+    }
+
+    func scheduleManualTranslation() {
+        guard isManualMode else { return }
+
+        manualTranslationDebounceTask?.cancel()
+
+        let trimmedText = manualInputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedText.isEmpty == false else {
+            cancelTranslationTimeout()
+            translationConfiguration?.invalidate()
+            translationConfiguration = nil
+            activeTranslationText = ""
+            manualTranslatedText = ""
+            manualTranslationError = nil
+            manualIsTranslating = false
+            overlayMode = .manualInput
+            return
         }
+
+        manualTranslationDebounceTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 280_000_000)
+            guard Task.isCancelled == false else { return }
+            await MainActor.run {
+                self?.submitManualTranslation()
+            }
+        }
+    }
+
+    func clearManualTranslation() {
+        if activeTranslationOrigin == .manualInput {
+            cancelTranslationTimeout()
+            translationConfiguration?.invalidate()
+            translationConfiguration = nil
+            activeTranslationText = ""
+        }
+        manualInputText = ""
+        manualTranslatedText = ""
+        manualTranslationError = nil
+        manualIsTranslating = false
+        overlayMode = .manualInput
+    }
+
+    func retrySelectionCapture() {
+        triggerSelectedTextTranslation()
+    }
+
+    func showManualInputMode(prefill: String = "") {
+        cancelTranslationTimeout()
+        translationConfiguration?.invalidate()
+        translationConfiguration = nil
+        activeTranslationOrigin = .manualInput
+        activeTranslationText = ""
+        manualIsTranslating = false
+        manualTranslationError = nil
+        if prefill.isEmpty == false {
+            manualInputText = prefill
+        }
+        if prefill.isEmpty {
+            manualTranslatedText = ""
+        }
+        overlayMode = manualTranslatedText.isEmpty ? .manualInput : .manualResult
+        overlayController.cancelAutoDismiss()
     }
 
     func retranslateCurrentSelectionIfVisible() {
+        let trimmedManualText = manualInputText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if isManualMode,
+           trimmedManualText.isEmpty == false,
+           manualTranslatedText.isEmpty == false || manualTranslationError != nil || manualIsTranslating {
+            scheduleManualTranslation()
+            return
+        }
+
         refreshTranslationForCurrentSelection()
     }
 
-    func completeTranslation(requestID: UUID, sourceLanguageIdentifier: String, translatedText: String) {
+    func completeTranslation(
+        requestID: UUID,
+        origin: TranslationRequestOrigin,
+        sourceLanguageIdentifier: String,
+        translatedText: String
+    ) {
         guard requestID == translationRequestID else { return }
 
         cancelTranslationTimeout()
-        detectedSourceLanguage = Locale.Language(identifier: sourceLanguageIdentifier)
+        let sourceLanguage = Locale.Language(identifier: sourceLanguageIdentifier)
+        detectedSourceLanguage = sourceLanguage
         detectedSourceLanguageName = sourceLanguageIdentifier.localizedAppLanguageName
-        self.translatedText = translatedText
         spokenRange = nil
         translationConfiguration = nil
-        errorMessage = nil
-        isTranslating = false
         lastUpdatedAt = Date()
-        overlayController.beginAutoDismissCountdown()
+        activeTranslationText = ""
 
-        if autoCopyTranslation {
-            copyTranslation()
+        switch origin {
+        case .selection:
+            self.translatedText = translatedText
+            errorMessage = nil
+            isTranslating = false
+            overlayMode = .selectionResult
+            overlayController.beginAutoDismissCountdown()
+
+            if autoCopyTranslation {
+                copyCurrentTranslation()
+            }
+        case .manualInput:
+            manualTranslatedText = translatedText
+            manualTranslationError = nil
+            manualIsTranslating = false
+            overlayMode = .manualResult
+            overlayController.cancelAutoDismiss()
         }
     }
 
-    func failTranslation(_ message: String, requestID: UUID? = nil) {
+    func failTranslation(
+        _ message: String,
+        requestID: UUID? = nil,
+        origin: TranslationRequestOrigin? = nil
+    ) {
         if let requestID, requestID != translationRequestID {
             return
         }
@@ -170,11 +337,23 @@ final class AppState: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         cancelTranslationTimeout()
         translationConfiguration = nil
         spokenRange = nil
-        translatedText = ""
-        errorMessage = message
-        isTranslating = false
         lastUpdatedAt = Date()
-        overlayController.beginAutoDismissCountdown()
+        activeTranslationText = ""
+
+        switch origin ?? activeTranslationOrigin {
+        case .selection:
+            translatedText = ""
+            errorMessage = message
+            isTranslating = false
+            overlayMode = .selectionError
+            overlayController.beginAutoDismissCountdown()
+        case .manualInput:
+            manualTranslatedText = ""
+            manualTranslationError = message
+            manualIsTranslating = false
+            overlayMode = .manualError
+            overlayController.cancelAutoDismiss()
+        }
     }
 
     private func fallbackAnchorRect() -> CGRect {
@@ -183,44 +362,97 @@ final class AppState: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     private func refreshTranslationForCurrentSelection() {
-        guard selectedText.isEmpty == false, overlayController.isVisible else {
+        guard selectedText.isEmpty == false, overlayController.isVisible, isManualMode == false else {
             translationConfiguration = nil
             return
         }
 
+        beginTranslation(
+            text: selectedText,
+            origin: .selection,
+            detectedSourceLanguage: detectedSourceLanguage
+        )
+    }
+
+    private func beginTranslation(
+        text: String,
+        origin: TranslationRequestOrigin,
+        detectedSourceLanguage: Locale.Language?
+    ) {
+        manualTranslationDebounceTask?.cancel()
         cancelTranslationTimeout()
-        translatedText = ""
-        errorMessage = nil
-        isTranslating = true
-        overlayController.cancelAutoDismiss()
+        translationConfiguration?.invalidate()
+        translationConfiguration = nil
+        translationRequestID = UUID()
+        let requestID = translationRequestID
+        activeTranslationOrigin = origin
+        activeTranslationText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        switch origin {
+        case .selection:
+            translatedText = ""
+            errorMessage = nil
+            isTranslating = true
+            overlayMode = .selectionTranslating
+            overlayController.cancelAutoDismiss()
+        case .manualInput:
+            manualTranslatedText = ""
+            manualTranslationError = nil
+            manualIsTranslating = true
+            overlayMode = .manualTranslating
+            overlayController.cancelAutoDismiss()
+        }
 
         Task {
-            await prepareTranslationForCurrentSelection()
+            await prepareTranslation(
+                text: text,
+                origin: origin,
+                requestID: requestID,
+                detectedSourceLanguage: detectedSourceLanguage
+            )
         }
     }
 
-    private func prepareTranslationForCurrentSelection() async {
-        let currentRequestID = translationRequestID
-        let text = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func prepareTranslation(
+        text: String,
+        origin: TranslationRequestOrigin,
+        requestID: UUID,
+        detectedSourceLanguage: Locale.Language?
+    ) async {
         let targetLanguage = selectedTargetLanguage.localeLanguage
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        guard text.isEmpty == false else {
+        guard trimmedText.isEmpty == false else {
             translationConfiguration = nil
             return
         }
 
-        guard let sourceLanguage = detectedSourceLanguage ?? detectLanguage(for: text) else {
+        let resolvedSourceLanguage: Locale.Language?
+        if origin == .manualInput {
+            resolvedSourceLanguage = manualSourceLanguage.localeLanguage ?? detectedSourceLanguage ?? detectLanguage(for: trimmedText)
+        } else {
+            resolvedSourceLanguage = detectedSourceLanguage ?? detectLanguage(for: trimmedText)
+        }
+
+        guard let sourceLanguage = resolvedSourceLanguage else {
             translationConfiguration = nil
-            failTranslation(L10n.tr("error.source_language_unknown"))
+            failTranslation(L10n.tr("error.source_language_unknown"), requestID: requestID, origin: origin)
             return
         }
 
-        detectedSourceLanguage = sourceLanguage
-        detectedSourceLanguageName = sourceLanguage.minimalIdentifier.localizedAppLanguageName
+        if origin == .selection {
+            self.detectedSourceLanguage = sourceLanguage
+            self.detectedSourceLanguageName = sourceLanguage.minimalIdentifier.localizedAppLanguageName
+        }
 
         guard sourceLanguage.languageCode?.identifier != targetLanguage.languageCode?.identifier else {
             translationConfiguration = nil
-            failTranslation(L10n.tr("error.same_language"))
+            completeTranslation(
+                requestID: requestID,
+                origin: origin,
+                sourceLanguageIdentifier: sourceLanguage.minimalIdentifier,
+                translatedText: trimmedText
+            )
             return
         }
 
@@ -232,23 +464,31 @@ final class AppState: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
                 source: sourceLanguage,
                 target: targetLanguage
             )
-            errorMessage = nil
-            isTranslating = true
             translationTaskID = UUID()
             notifyTranslationWorkerRefresh()
             translationConfiguration = nil
             await Task.yield()
-            guard translationRequestID == currentRequestID else { return }
+            guard translationRequestID == requestID else { return }
             translationConfiguration = configuration
-            startTranslationTimeout(for: currentRequestID)
+            startTranslationTimeout(for: requestID, origin: origin)
 
         case .unsupported:
             translationConfiguration = nil
-            failTranslation(String(format: L10n.tr("error.unsupported_pair"), detectedSourceLanguageName, selectedTargetLanguage.title))
+            let sourceLanguageName: String
+            if origin == .selection {
+                sourceLanguageName = detectedSourceLanguageName
+            } else {
+                sourceLanguageName = sourceLanguage.minimalIdentifier.localizedAppLanguageName
+            }
+            failTranslation(
+                String(format: L10n.tr("error.unsupported_pair"), sourceLanguageName, selectedTargetLanguage.title),
+                requestID: requestID,
+                origin: origin
+            )
 
         @unknown default:
             translationConfiguration = nil
-            failTranslation(L10n.tr("error.unknown_translation_status"))
+            failTranslation(L10n.tr("error.unknown_translation_status"), requestID: requestID, origin: origin)
         }
     }
 
@@ -304,6 +544,45 @@ final class AppState: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         text.range(of: #"[A-Za-z]"#, options: .regularExpression) != nil
     }
 
+    private func startSelectionProbe() {
+        cancelTranslationTimeout()
+        translationConfiguration?.invalidate()
+        translationConfiguration = nil
+        translationRequestID = UUID()
+        translationTaskID = UUID()
+        notifyTranslationWorkerRefresh()
+        spokenRange = nil
+        translatedText = ""
+        errorMessage = nil
+        isTranslating = false
+        activeTranslationOrigin = .selection
+        activeTranslationText = ""
+        overlayMode = .probingSelection
+        lastUpdatedAt = Date()
+        overlayController.cancelAutoDismiss()
+    }
+
+    private func shouldAutoTranslate(snapshot: SelectedTextSnapshot) -> Bool {
+        let trimmed = snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return false }
+        guard trimmed.count <= 5_000 else { return false }
+
+        return true
+    }
+
+    var isManualMode: Bool {
+        switch overlayMode {
+        case .manualInput, .manualTranslating, .manualResult, .manualError:
+            return true
+        default:
+            return false
+        }
+    }
+
+    var hasManualContent: Bool {
+        manualInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
     func stopSpeaking() {
         if speechSynthesizer.isSpeaking {
             speechSynthesizer.stopSpeaking(at: .immediate)
@@ -354,7 +633,11 @@ final class AppState: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         })
     }
 
-    private func startTranslationTimeout(for requestID: UUID, after delay: TimeInterval = 8) {
+    private func startTranslationTimeout(
+        for requestID: UUID,
+        origin: TranslationRequestOrigin,
+        after delay: TimeInterval = 8
+    ) {
         cancelTranslationTimeout()
         translationTimeoutTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -362,8 +645,19 @@ final class AppState: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
             await MainActor.run {
                 guard let self else { return }
-                guard self.translationRequestID == requestID, self.isTranslating else { return }
-                self.failTranslation(L10n.tr("error.translation.system_unavailable"), requestID: requestID)
+                let isStillTranslating: Bool
+                switch origin {
+                case .selection:
+                    isStillTranslating = self.isTranslating
+                case .manualInput:
+                    isStillTranslating = self.manualIsTranslating
+                }
+                guard self.translationRequestID == requestID, isStillTranslating else { return }
+                self.failTranslation(
+                    L10n.tr("error.translation.system_unavailable"),
+                    requestID: requestID,
+                    origin: origin
+                )
             }
         }
     }

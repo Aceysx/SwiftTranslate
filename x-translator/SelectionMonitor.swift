@@ -72,7 +72,6 @@ final class SelectionMonitor {
         let pasteboard = NSPasteboard.general
         let originalSnapshot = snapshotPasteboardItems(from: pasteboard)
         let originalChangeCount = pasteboard.changeCount
-
         sendCopyShortcut()
         RunLoop.current.run(until: Date().addingTimeInterval(0.12))
 
@@ -143,4 +142,5 @@ final class SelectionMonitor {
 
         pasteboard.writeObjects(items)
     }
+
 }

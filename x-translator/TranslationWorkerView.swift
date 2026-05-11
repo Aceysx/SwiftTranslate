@@ -17,22 +17,28 @@ struct TranslationWorkerView: View {
             .frame(width: 1, height: 1)
             .id(taskID)
             .translationTask(state.translationConfiguration) { session in
-                guard state.selectedText.isEmpty == false else { return }
+                guard state.activeTranslationText.isEmpty == false else { return }
                 let requestID = state.translationRequestID
-                let selectedText = state.selectedText
+                let origin = state.activeTranslationOrigin
+                let inputText = state.activeTranslationText
 
                 do {
-                    let response = try await session.translate(selectedText)
+                    let response = try await session.translate(inputText)
                     await MainActor.run {
                         state.completeTranslation(
                             requestID: requestID,
+                            origin: origin,
                             sourceLanguageIdentifier: response.sourceLanguage.minimalIdentifier,
                             translatedText: response.targetText
                         )
                     }
                 } catch {
                     await MainActor.run {
-                        state.failTranslation(Self.presentableMessage(for: error), requestID: requestID)
+                        state.failTranslation(
+                            Self.presentableMessage(for: error),
+                            requestID: requestID,
+                            origin: origin
+                        )
                     }
                 }
             }

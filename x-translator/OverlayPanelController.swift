@@ -39,7 +39,8 @@ final class OverlayPanelController {
         }) { [weak self] isHovering in
             self?.handleHoverChange(isHovering)
         }
-        let panelSize = panel.frame.size == .zero ? CGSize(width: 780, height: 280) : panel.frame.size
+        let targetPanelSize = preferredPanelSize(for: state)
+        let panelSize = panel.frame.size == .zero ? targetPanelSize : targetPanelSize
 
         if let hostingView {
             hostingView.rootView = content
@@ -53,7 +54,7 @@ final class OverlayPanelController {
         }
 
         let origin = panelOrigin(for: anchorRect, panelSize: panelSize)
-        panel.setFrame(CGRect(origin: origin, size: panelSize), display: true)
+        panel.setFrame(CGRect(origin: origin, size: panelSize), display: true, animate: true)
         cancelAutoDismiss()
         remainingDismissInterval = 4
         isHovering = false
@@ -84,7 +85,7 @@ final class OverlayPanelController {
 
     private func makePanel() -> OverlayPanel {
         let panel = OverlayPanel(
-            contentRect: CGRect(x: 0, y: 0, width: 780, height: 280),
+            contentRect: CGRect(x: 0, y: 0, width: 760, height: 260),
             styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView, .resizable],
             backing: .buffered,
             defer: false
@@ -100,7 +101,7 @@ final class OverlayPanelController {
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.becomesKeyOnlyIfNeeded = true
-        panel.minSize = CGSize(width: 700, height: 240)
+        panel.minSize = CGSize(width: 560, height: 180)
         panel.standardWindowButton(.closeButton)?.isHidden = true
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.standardWindowButton(.zoomButton)?.isHidden = true
@@ -196,5 +197,21 @@ final class OverlayPanelController {
         }
 
         return CGPoint(x: x, y: y)
+    }
+
+    private func preferredPanelSize(for state: AppState) -> CGSize {
+        if state.isManualMode {
+            let hasExpandedContent = state.manualIsTranslating || state.manualTranslatedText.isEmpty == false || state.manualTranslationError != nil
+            return CGSize(
+                width: 700,
+                height: hasExpandedContent ? 286 : 192
+            )
+        }
+
+        if state.overlayMode == .probingSelection {
+            return CGSize(width: 760, height: 250)
+        }
+
+        return CGSize(width: 780, height: 280)
     }
 }

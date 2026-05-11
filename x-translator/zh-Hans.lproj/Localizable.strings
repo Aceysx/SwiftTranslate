@@ -40,12 +40,21 @@
 "overlay.copy" = "复制";
 "overlay.replace_clipboard" = "写入剪贴板";
 "overlay.ready" = "准备就绪";
+"overlay.probing" = "正在尝试读取当前选中内容";
+"overlay.manual_hint" = "没有检测到明确的选中文本。你可以直接输入或粘贴内容。";
+"overlay.manual_placeholder" = "输入或粘贴句子、段落";
+"overlay.manual_translate" = "翻译";
+"overlay.manual_clear" = "清空";
+"overlay.try_selection_again" = "重新读取选中内容";
 "overlay.status.translating" = "正在翻译";
+"overlay.status.detecting" = "正在检测";
+"overlay.status.manual_input" = "手动输入";
 "overlay.status.unavailable" = "暂时不可用";
 "overlay.status.result" = "翻译结果";
 
 "error.translation.system_unavailable" = "系统翻译当前不可用。请先打开 macOS 自带的“翻译”应用确认语言可用，或稍后再试。";
 "error.translation.generic" = "翻译失败，请稍后再试。";
+"error.manual_input_empty" = "请先输入一些需要翻译的内容。";
 "error.accessibility_permission_required" = "使用快捷键前需要先开启辅助功能权限。请在系统设置中允许后再试。";
 "error.no_frontmost_app" = "当前没有可读取的前台应用。";
 "error.own_app" = "请先切回要翻译的应用，再按快捷键触发翻译。";

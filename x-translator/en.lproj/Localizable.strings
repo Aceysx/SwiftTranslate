@@ -40,12 +40,21 @@
 "overlay.copy" = "Copy";
 "overlay.replace_clipboard" = "Write to clipboard";
 "overlay.ready" = "Ready";
+"overlay.probing" = "Trying to read the current selection";
+"overlay.manual_hint" = "No clear selection was detected. Type or paste text below.";
+"overlay.manual_placeholder" = "Type or paste a sentence or paragraph";
+"overlay.manual_translate" = "Translate";
+"overlay.manual_clear" = "Clear";
+"overlay.try_selection_again" = "Try selection again";
 "overlay.status.translating" = "Translating";
+"overlay.status.detecting" = "Detecting";
+"overlay.status.manual_input" = "Manual Input";
 "overlay.status.unavailable" = "Unavailable";
 "overlay.status.result" = "Translation";
 
 "error.translation.system_unavailable" = "System translation is currently unavailable. Open the built-in macOS Translate app to confirm the language is available, or try again later.";
 "error.translation.generic" = "Translation failed. Please try again later.";
+"error.manual_input_empty" = "Enter some text before translating.";
 "error.accessibility_permission_required" = "Accessibility permission is required before the shortcut can read selected text. Enable it in System Settings and try again.";
 "error.no_frontmost_app" = "No readable foreground app is currently available.";
 "error.own_app" = "Switch back to the app you want to translate, then press the shortcut again.";
